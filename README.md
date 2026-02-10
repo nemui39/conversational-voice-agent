@@ -23,6 +23,7 @@
 ### 前提条件
 
 - Python 3.12+
+- PortAudio（`sudo apt install libportaudio2` / `brew install portaudio`）
 - [VOICEVOX](https://voicevox.hiroshiba.jp/) がローカルで起動していること（デフォルト: `http://localhost:50021`）
 - Anthropic API Key
 
@@ -31,6 +32,8 @@
 ```bash
 git clone https://github.com/nemui39/conversational-voice-agent.git
 cd conversational-voice-agent
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
 ```
 
@@ -44,6 +47,13 @@ cp .env.example .env
 ### 実行
 
 ```bash
+# Day2: 録音 → STT テストモード
+python -m voice_agent.main --mode stt
+
+# Day2: WAVファイルも保存する場合
+python -m voice_agent.main --mode stt --save-wav
+
+# フルパイプライン (Day5以降)
 voice-agent
 ```
 

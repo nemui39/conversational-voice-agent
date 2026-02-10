@@ -1,0 +1,6 @@
+"""共有設定値"""
+
+SAMPLE_RATE = 16000
+CHANNELS = 1
+DTYPE = "int16"
+BLOCK_SIZE = 1024
