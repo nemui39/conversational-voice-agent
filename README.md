@@ -1,19 +1,19 @@
 # Conversational Voice Agent
 
-マイク入力からリアルタイムで音声会話できるAIエージェント。
+音声入力からリアルタイムで会話できる熱血AIコーチ。
 
 ## アーキテクチャ
 
 ```
-🎤 マイク → [STT: Whisper] → [LLM: Claude API] → [TTS: VOICEVOX] → 🔊 スピーカー
+🎤 音声入力 → [STT: Whisper] → [LLM: Claude API] → [TTS: VOICEVOX] → 🔊 音声出力
 ```
 
 ## 技術スタック
 
 | コンポーネント | 技術 |
 |-------------|------|
-| Speech-to-Text | faster-whisper |
-| LLM | Anthropic Claude API |
+| Speech-to-Text | faster-whisper (small) |
+| LLM | Anthropic Claude API (Sonnet) |
 | Text-to-Speech | VOICEVOX |
 | オーディオI/O | sounddevice |
 | 言語 | Python 3.12+ |
@@ -41,33 +41,35 @@ pip install -e .
 
 ```bash
 cp .env.example .env
-# .env を編集して API キーを設定
+# .env を編集して ANTHROPIC_API_KEY を設定
 ```
 
-### 実行
+## 使い方
+
+### デモ（サンプル音声で実行）
 
 ```bash
-# Day2: 録音 → STT テストモード
-python -m voice_agent.main --mode stt
+# やる気が出ないときのコーチ応答
+python -m voice_agent.main --file samples/in_motivation.wav --no-play
 
-# Day2: WAVファイルも保存する場合
-python -m voice_agent.main --mode stt --save-wav
+# プレゼン前の緊張へのコーチ応答
+python -m voice_agent.main --file samples/in_anxiety.wav --no-play
 
-# フルパイプライン (Day5以降)
-voice-agent
+# 出力先を指定
+python -m voice_agent.main --file samples/in_motivation.wav --out outputs/reply.wav --no-play
+
+# VOICEVOX 話者を変更（ID=3 など）
+python -m voice_agent.main --file input.wav --speaker 3 --no-play
 ```
 
-## 1週間ロードマップ
+出力WAVは `outputs/reply.wav` に保存されます。
 
-| Day | マイルストーン |
-|-----|-------------|
-| 1 | プロジェクトセットアップ + ファーストコミット |
-| 2 | STT実装 (Whisper) + マイク入力 |
-| 3 | LLM統合 (Claude API) |
-| 4 | TTS実装 (VOICEVOX連携) |
-| 5 | パイプライン結合 + リアルタイム化 |
-| 6 | エラーハンドリング + 会話履歴管理 |
-| 7 | テスト + ドキュメント + デモ |
+### マイク入力テスト
+
+```bash
+python -m voice_agent.main --mode stt
+python -m voice_agent.main --mode stt --save-wav
+```
 
 ## ライセンス
 

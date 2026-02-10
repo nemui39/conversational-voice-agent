@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -39,14 +41,31 @@ def _load_wav(file_path: str) -> "np.ndarray":
     return audio
 
 
-def run_stt_file(file_path: str) -> None:
-    """WAVファイル → STT → LLM → TTS → 再生 のフルパイプラインテスト。"""
-    from voice_agent.audio import play_wav_bytes
+def trim_for_speech(text: str, max_sentences: int = 3) -> str:
+    """音声向けにテキストを整形する。最大 max_sentences 文に切り詰める。"""
+    # 句点・感嘆符・疑問符で文を分割
+    sentences = re.split(r'(?<=[。！？!?])', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if len(sentences) <= max_sentences:
+        return text.strip()
+
+    return "".join(sentences[:max_sentences])
+
+
+def run_pipeline(
+    file_path: str,
+    out_path: str = "outputs/reply.wav",
+    speaker_id: int = 1,
+    no_play: bool = False,
+) -> None:
+    """WAVファイル → STT → LLM → TTS → 出力 のフルパイプライン。"""
     from voice_agent.llm import chat
     from voice_agent.stt import transcribe
     from voice_agent.tts import synthesize
 
-    print(f"=== フルパイプラインテスト: {file_path} ===")
+    print(f"=== Conversational Voice Agent ===")
+    print(f"  入力: {file_path}")
 
     audio = _load_wav(file_path)
 
@@ -61,29 +80,32 @@ def run_stt_file(file_path: str) -> None:
     print("  コーチ応答中...")
 
     reply = chat(text)
+    reply = trim_for_speech(reply)
     print(f"  コーチ: {reply}")
 
-    print("  音声合成中...")
-    wav_bytes = synthesize(reply)
+    print(f"  音声合成中... (speaker={speaker_id})")
+    wav_bytes = synthesize(reply, speaker_id=speaker_id)
 
-    try:
-        from voice_agent.audio import play_wav_bytes
-        print(f"  再生中... ({len(wav_bytes)} bytes)")
-        play_wav_bytes(wav_bytes)
-    except Exception:
-        # WSL2等でオーディオデバイスがない場合はWAV保存にフォールバック
-        out_path = "coach_reply.wav"
-        with open(out_path, "wb") as f:
-            f.write(wav_bytes)
-        print(f"  再生デバイスなし → {out_path} に保存しました ({len(wav_bytes)} bytes)")
+    # 出力ディレクトリを作成
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_path).write_bytes(wav_bytes)
+    print(f"  保存: {out_path} ({len(wav_bytes):,} bytes)")
+
+    if not no_play:
+        try:
+            from voice_agent.audio import play_wav_bytes
+            print("  再生中...")
+            play_wav_bytes(wav_bytes)
+        except Exception:
+            print("  (再生デバイスなし — WAVファイルを直接開いてください)")
 
 
 def run_stt_loop(save_wav: bool = False) -> None:
-    """Day2 デバッグモード: 録音 → STT → print のループ。"""
+    """録音 → STT → print のループ（マイクテスト用）。"""
     from voice_agent.audio import record_until_silence, save_wav as _save_wav
     from voice_agent.stt import transcribe
 
-    print("=== Day2: 録音 → STT テストモード ===")
+    print("=== 録音 → STT テストモード ===")
     print("マイクに向かって話してください。Ctrl+C で終了。")
     print()
 
@@ -127,27 +149,56 @@ def main() -> None:
     """音声会話エージェントのメインループ。"""
     load_dotenv()
 
-    parser = argparse.ArgumentParser(description="Conversational Voice Agent")
-    parser.add_argument(
-        "--mode",
-        choices=["stt", "full"],
-        default="full",
-        help="実行モード: stt=録音→STTのみ, full=全パイプライン",
+    parser = argparse.ArgumentParser(
+        description="Conversational Voice Agent — 熱血AIコーチ",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+使用例:
+  python -m voice_agent.main --file input.wav
+  python -m voice_agent.main --file input.wav --out reply.wav --no-play
+  python -m voice_agent.main --file input.wav --speaker 3
+  python -m voice_agent.main --mode stt
+""",
     )
     parser.add_argument(
         "--file",
-        help="WAVファイルパス（マイクの代わりにファイル入力でSTTテスト）",
+        help="入力WAVファイル（音声→STT→LLM→TTS）",
+    )
+    parser.add_argument(
+        "--out",
+        default="outputs/reply.wav",
+        help="出力WAVファイルパス (default: outputs/reply.wav)",
+    )
+    parser.add_argument(
+        "--speaker",
+        type=int,
+        default=1,
+        help="VOICEVOX話者ID (default: 1)",
+    )
+    parser.add_argument(
+        "--no-play",
+        action="store_true",
+        help="音声再生をスキップ（WAV保存のみ）",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["stt"],
+        help="stt=録音→STTのみ（マイクテスト用）",
     )
     parser.add_argument(
         "--save-wav",
         action="store_true",
-        help="録音データをWAVファイルに保存する (デバッグ用)",
+        help="録音データをWAVに保存 (--mode stt 用)",
     )
     args = parser.parse_args()
 
-    # --file が指定されたらファイルモード（--mode不要）
     if args.file:
-        run_stt_file(args.file)
+        run_pipeline(
+            file_path=args.file,
+            out_path=args.out,
+            speaker_id=args.speaker,
+            no_play=args.no_play,
+        )
         return
 
     if args.mode == "stt":
@@ -157,12 +208,7 @@ def main() -> None:
             print("\n終了します。")
         return
 
-    # full モード (Day5 で実装予定)
-    print("=== Conversational Voice Agent ===")
-    print("full モードは Day5 で実装予定です。")
-    print("今は --mode stt で STT テストができます:")
-    print("  python -m voice_agent.main --mode stt")
-    print("  python -m voice_agent.main --file test.wav")
+    parser.print_help()
 
 
 if __name__ == "__main__":
