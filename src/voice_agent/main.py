@@ -40,11 +40,13 @@ def _load_wav(file_path: str) -> "np.ndarray":
 
 
 def run_stt_file(file_path: str) -> None:
-    """WAVファイル → STT → LLM応答 のパイプラインテスト。"""
+    """WAVファイル → STT → LLM → TTS → 再生 のフルパイプラインテスト。"""
+    from voice_agent.audio import play_wav_bytes
     from voice_agent.llm import chat
     from voice_agent.stt import transcribe
+    from voice_agent.tts import synthesize
 
-    print(f"=== STT + LLM テスト: {file_path} ===")
+    print(f"=== フルパイプラインテスト: {file_path} ===")
 
     audio = _load_wav(file_path)
 
@@ -60,6 +62,20 @@ def run_stt_file(file_path: str) -> None:
 
     reply = chat(text)
     print(f"  コーチ: {reply}")
+
+    print("  音声合成中...")
+    wav_bytes = synthesize(reply)
+
+    try:
+        from voice_agent.audio import play_wav_bytes
+        print(f"  再生中... ({len(wav_bytes)} bytes)")
+        play_wav_bytes(wav_bytes)
+    except Exception:
+        # WSL2等でオーディオデバイスがない場合はWAV保存にフォールバック
+        out_path = "coach_reply.wav"
+        with open(out_path, "wb") as f:
+            f.write(wav_bytes)
+        print(f"  再生デバイスなし → {out_path} に保存しました ({len(wav_bytes)} bytes)")
 
 
 def run_stt_loop(save_wav: bool = False) -> None:
