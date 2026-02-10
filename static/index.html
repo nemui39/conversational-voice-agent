@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice Coach</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #eee; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+  .container { text-align: center; max-width: 480px; padding: 2rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+  .sub { color: #888; margin-bottom: 2rem; font-size: 0.9rem; }
+  #btn { width: 120px; height: 120px; border-radius: 50%; border: none; font-size: 1rem; cursor: pointer; transition: all 0.2s; background: #e94560; color: #fff; font-weight: bold; }
+  #btn:hover { transform: scale(1.05); }
+  #btn.recording { background: #ff6b6b; animation: pulse 1s infinite; }
+  #btn.processing { background: #555; cursor: wait; }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(233,69,96,0.4); } 50% { box-shadow: 0 0 0 20px rgba(233,69,96,0); } }
+  #status { margin-top: 1.5rem; min-height: 1.2rem; color: #aaa; }
+  #texts { margin-top: 1.5rem; text-align: left; }
+  .you, .coach { padding: 0.5rem 0; line-height: 1.5; }
+  .you span { color: #888; }
+  .coach span { color: #e94560; }
+  audio { margin-top: 1rem; width: 100%; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Voice Coach</h1>
+  <p class="sub">話しかけると、熱血コーチが応えます</p>
+  <button id="btn" onclick="toggle()">Push to Talk</button>
+  <div id="status"></div>
+  <div id="texts"></div>
+  <audio id="player" controls style="display:none"></audio>
+</div>
+<script>
+let mediaRecorder, chunks = [], recording = false;
+const btn = document.getElementById('btn');
+const status = document.getElementById('status');
+const texts = document.getElementById('texts');
+const player = document.getElementById('player');
+
+async function toggle() {
+  if (recording) { stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+    chunks = [];
+    mediaRecorder.ondataavailable = e => chunks.push(e.data);
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      send(new Blob(chunks, { type: 'audio/webm' }));
+    };
+    mediaRecorder.start();
+    recording = true;
+    btn.textContent = 'Stop';
+    btn.className = 'recording';
+    status.textContent = '録音中...';
+  } catch (e) {
+    status.textContent = 'マイクを許可してください';
+  }
+}
+
+function stop() {
+  mediaRecorder.stop();
+  recording = false;
+  btn.textContent = '...';
+  btn.className = 'processing';
+  status.textContent = '処理中（STT → LLM → TTS）...';
+}
+
+async function send(blob) {
+  // webm → wav 変換 (ブラウザ側)
+  const wav = await webmToWav(blob);
+  const form = new FormData();
+  form.append('file', wav, 'input.wav');
+  try {
+    const res = await fetch('/api/coach', { method: 'POST', body: form });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || res.statusText);
+    }
+    const userText = decodeURIComponent(res.headers.get('X-User-Text') || '');
+    const coachText = decodeURIComponent(res.headers.get('X-Coach-Text') || '');
+    texts.innerHTML = `<div class="you"><span>あなた:</span> ${userText}</div><div class="coach"><span>コーチ:</span> ${coachText}</div>`;
+    const audioBlob = await res.blob();
+    const url = URL.createObjectURL(audioBlob);
+    player.src = url;
+    player.style.display = 'block';
+    player.play();
+    status.textContent = '';
+  } catch (e) {
+    status.textContent = 'エラー: ' + e.message;
+  }
+  btn.textContent = 'Push to Talk';
+  btn.className = '';
+}
+
+async function webmToWav(blob) {
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  const arrayBuf = await blob.arrayBuffer();
+  const decoded = await audioCtx.decodeAudioData(arrayBuf);
+  const samples = decoded.getChannelData(0);
+  // float32 → int16
+  const int16 = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    int16[i] = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32767)));
+  }
+  // WAV header
+  const buf = new ArrayBuffer(44 + int16.byteLength);
+  const view = new DataView(buf);
+  const sr = 16000;
+  writeStr(view, 0, 'RIFF');
+  view.setUint32(4, 36 + int16.byteLength, true);
+  writeStr(view, 8, 'WAVE');
+  writeStr(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sr, true);
+  view.setUint32(28, sr * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(view, 36, 'data');
+  view.setUint32(40, int16.byteLength, true);
+  new Int16Array(buf, 44).set(int16);
+  audioCtx.close();
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+function writeStr(view, offset, str) {
+  for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+}
+</script>
+</body>
+</html>
