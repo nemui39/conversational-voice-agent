@@ -1,20 +1,19 @@
 """FastAPI Web API
 
 POST /api/coach に WAV をアップロードすると、
-熱血コーチの返信 WAV が返る。
+コーチの返信音声 + ビセムタイムラインを JSON で返す。
 """
 
 from __future__ import annotations
 
+import base64
 import io
-import tempfile
 import wave
-from urllib.parse import quote
 
 import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
@@ -22,17 +21,18 @@ from voice_agent.llm import chat
 from voice_agent.main import trim_for_speech
 from voice_agent.stt import transcribe
 from voice_agent.tts import synthesize
+from voice_agent.viseme import extract_visemes
 
 load_dotenv()
 
-app = FastAPI(title="Conversational Voice Agent", version="0.1.0")
+app = FastAPI(title="Conversational Voice Agent", version="0.2.0")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    """簡易 Web UI を返す。"""
+    """Web UI を返す。"""
     html_path = STATIC_DIR / "index.html"
     if html_path.exists():
         return html_path.read_text(encoding="utf-8")
@@ -44,7 +44,7 @@ def coach(
     file: UploadFile = File(...),
     speaker: int = Query(1, description="VOICEVOX話者ID"),
 ):
-    """音声ファイルを受け取り、コーチの返信音声を返す。"""
+    """音声ファイルを受け取り、コーチの返信音声+ビセムデータを返す。"""
     # 入力WAVを読み込み
     try:
         raw = file.file.read()
@@ -75,20 +75,24 @@ def coach(
     reply = chat(text)
     reply = trim_for_speech(reply)
 
-    # TTS
-    wav_bytes = synthesize(reply, speaker_id=speaker)
+    # TTS (audio_query も取得してビセム抽出に使う)
+    wav_bytes, audio_query = synthesize(reply, speaker_id=speaker, return_query=True)
 
-    # 一時ファイルに書き出して返す
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    tmp.write(wav_bytes)
-    tmp.close()
+    # ビセムタイムライン抽出
+    visemes = extract_visemes(audio_query)
 
-    return FileResponse(
-        tmp.name,
-        media_type="audio/wav",
-        filename="coach_reply.wav",
-        headers={
-            "X-User-Text": quote(text),
-            "X-Coach-Text": quote(reply),
-        },
-    )
+    # 音声を base64 エンコード
+    audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
+
+    return JSONResponse({
+        "status": "ok",
+        "user_text": text,
+        "coach_text": reply,
+        "audio_base64": audio_b64,
+        "sample_rate": audio_query.get("outputSamplingRate", 24000),
+        "visemes": visemes,
+    })
+
+
+# 静的ファイル配信（VRMモデル等）— ルート定義の後にマウント
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

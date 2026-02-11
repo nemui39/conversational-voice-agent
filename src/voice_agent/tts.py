@@ -15,7 +15,11 @@ DEFAULT_SPEAKER_ID = 1
 _TIMEOUT = 30.0
 
 
-def synthesize(text: str, speaker_id: int = DEFAULT_SPEAKER_ID) -> bytes:
+def synthesize(
+    text: str,
+    speaker_id: int = DEFAULT_SPEAKER_ID,
+    return_query: bool = False,
+) -> bytes | tuple[bytes, dict]:
     """テキストを音声WAVデータに変換する。
 
     VOICEVOX の 2段階API を呼ぶ:
@@ -25,9 +29,10 @@ def synthesize(text: str, speaker_id: int = DEFAULT_SPEAKER_ID) -> bytes:
     Args:
         text: 読み上げるテキスト
         speaker_id: VOICEVOX話者ID
+        return_query: Trueの場合 (wav_bytes, audio_query) タプルを返す
 
     Returns:
-        WAV形式の音声バイト列
+        WAV形式の音声バイト列。return_query=True の場合は (wav_bytes, audio_query) タプル。
     """
     try:
         # 1. audio_query
@@ -55,4 +60,6 @@ def synthesize(text: str, speaker_id: int = DEFAULT_SPEAKER_ID) -> bytes:
     except httpx.HTTPStatusError as e:
         raise RuntimeError(f"VOICEVOX API エラー: {e.response.status_code} {e.response.text[:200]}") from e
 
+    if return_query:
+        return syn_resp.content, audio_query
     return syn_resp.content

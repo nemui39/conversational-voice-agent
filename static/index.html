@@ -6,42 +6,358 @@
 <title>Voice Coach</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #eee; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-  .container { text-align: center; max-width: 480px; padding: 2rem; }
-  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
-  .sub { color: #888; margin-bottom: 2rem; font-size: 0.9rem; }
-  #btn { width: 120px; height: 120px; border-radius: 50%; border: none; font-size: 1rem; cursor: pointer; transition: all 0.2s; background: #e94560; color: #fff; font-weight: bold; }
-  #btn:hover { transform: scale(1.05); }
+  body {
+    font-family: -apple-system, sans-serif;
+    background: #1a1a2e;
+    color: #eee;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+  }
+  .container { text-align: center; max-width: 520px; width: 100%; padding: 1rem; }
+
+  /* VRM Canvas */
+  #avatar-canvas {
+    width: 100%;
+    height: 400px;
+    border-radius: 12px;
+    background: #16213e;
+  }
+  #loading-overlay {
+    position: relative;
+    top: -220px;
+    color: #666;
+    font-size: 0.9rem;
+    pointer-events: none;
+  }
+
+  /* State badge */
+  .state-badge {
+    margin-top: 0.8rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    padding: 0.3rem 0.8rem;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.05);
+  }
+  .state-icon {
+    font-size: 1rem;
+    line-height: 1;
+  }
+
+  /* Button */
+  #btn {
+    margin-top: 1rem;
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    border: none;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    background: #e94560;
+    color: #fff;
+    font-weight: bold;
+  }
+  #btn:hover:not(:disabled) { transform: scale(1.05); }
+  #btn:disabled { opacity: 0.5; cursor: not-allowed; }
   #btn.recording { background: #ff6b6b; animation: pulse 1s infinite; }
-  #btn.processing { background: #555; cursor: wait; }
-  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(233,69,96,0.4); } 50% { box-shadow: 0 0 0 20px rgba(233,69,96,0); } }
-  #status { margin-top: 1.5rem; min-height: 1.2rem; color: #aaa; }
-  #texts { margin-top: 1.5rem; text-align: left; }
-  .you, .coach { padding: 0.5rem 0; line-height: 1.5; }
-  .you span { color: #888; }
-  .coach span { color: #e94560; }
-  audio { margin-top: 1rem; width: 100%; }
+  @keyframes pulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(233,69,96,0.4); }
+    50% { box-shadow: 0 0 0 20px rgba(233,69,96,0); }
+  }
+
+  /* Transcript */
+  #texts { margin-top: 1rem; text-align: left; font-size: 0.9rem; }
+  .you, .coach { padding: 0.3rem 0; line-height: 1.5; }
+  .you .label { color: #888; }
+  .coach .label { color: #e94560; }
 </style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.176.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.176.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.min.js"
+  }
+}
+</script>
 </head>
 <body>
 <div class="container">
-  <h1>Voice Coach</h1>
-  <p class="sub">話しかけると、熱血コーチが応えます</p>
-  <button id="btn" onclick="toggle()">Push to Talk</button>
-  <div id="status"></div>
+  <canvas id="avatar-canvas"></canvas>
+  <div id="loading-overlay">Loading VRM model...</div>
+  <div class="state-badge">
+    <span class="state-icon" id="state-icon"></span>
+    <span id="state-label"></span>
+  </div>
+  <br>
+  <button id="btn">Push to Talk</button>
   <div id="texts"></div>
-  <audio id="player" controls style="display:none"></audio>
 </div>
-<script>
-let mediaRecorder, chunks = [], recording = false;
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+// ===== DOM Elements =====
+const canvas = document.getElementById('avatar-canvas');
+const loadingOverlay = document.getElementById('loading-overlay');
+const stateIcon = document.getElementById('state-icon');
+const stateLabel = document.getElementById('state-label');
 const btn = document.getElementById('btn');
-const status = document.getElementById('status');
-const texts = document.getElementById('texts');
-const player = document.getElementById('player');
+const textsEl = document.getElementById('texts');
+
+// ===== State Machine =====
+const STATES = {
+  IDLE:      { label: 'Ready',        icon: '\u25CF', color: '#4ade80' },
+  LISTENING: { label: 'Listening...', icon: '\u25C9', color: '#f87171' },
+  THINKING:  { label: 'Thinking...', icon: '\u25CC', color: '#fbbf24' },
+  SPEAKING:  { label: 'Speaking...',  icon: '\u25B6', color: '#60a5fa' },
+  ERROR:     { label: 'Error',        icon: '\u2715', color: '#ef4444' },
+};
+
+let currentState = 'IDLE';
+
+function setState(newState, detail) {
+  currentState = newState;
+  const s = STATES[newState];
+  stateIcon.textContent = s.icon;
+  stateIcon.style.color = s.color;
+  stateLabel.textContent = detail || s.label;
+  btn.disabled = (newState === 'THINKING' || newState === 'SPEAKING');
+  if (newState === 'LISTENING') {
+    btn.textContent = 'Stop';
+    btn.classList.add('recording');
+  } else {
+    btn.textContent = 'Push to Talk';
+    btn.classList.remove('recording');
+  }
+}
+
+setState('IDLE');
+
+// ===== Three.js Scene =====
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x16213e);
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+
+function resizeCanvas() {
+  const w = canvas.parentElement.clientWidth;
+  const h = 400;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+
+const camera = new THREE.PerspectiveCamera(20, canvas.clientWidth / 400, 0.1, 20);
+camera.position.set(0, 1.35, 1.8);
+camera.lookAt(0, 1.35, 0);
+
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+dirLight.position.set(1, 2, 3);
+scene.add(dirLight);
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// ===== VRM Loading =====
+let currentVrm = null;
+
+const loader = new GLTFLoader();
+loader.register((parser) => new VRMLoaderPlugin(parser));
+
+loader.load(
+  '/static/model.vrm',
+  (gltf) => {
+    const vrm = gltf.userData.vrm;
+    VRMUtils.removeUnnecessaryVertices(gltf.scene);
+    VRMUtils.removeUnnecessaryJoints(gltf.scene);
+
+    scene.add(vrm.scene);
+    currentVrm = vrm;
+
+    // head ボーンの位置でカメラを自動調整
+    const headNode = vrm.humanoid.getNormalizedBoneNode('head');
+    if (headNode) {
+      const headPos = new THREE.Vector3();
+      headNode.getWorldPosition(headPos);
+      camera.position.set(0, headPos.y, 1.8);
+      camera.lookAt(0, headPos.y - 0.05, 0);
+    }
+
+    loadingOverlay.style.display = 'none';
+    console.log('VRM loaded. Available expressions:',
+      vrm.expressionManager ? Object.keys(vrm.expressionManager._expressionMap || {}) : 'none');
+  },
+  (progress) => {
+    if (progress.total > 0) {
+      const pct = Math.round(progress.loaded / progress.total * 100);
+      loadingOverlay.textContent = `Loading VRM model... ${pct}%`;
+    }
+  },
+  (error) => {
+    console.error('VRM load error:', error);
+    loadingOverlay.textContent = 'VRM model not found. Place model.vrm in static/';
+  }
+);
+
+// ===== Lip Sync Engine =====
+const VISEME_MAP = {
+  'A': 'aa', 'I': 'ih', 'U': 'ou', 'E': 'ee', 'O': 'oh', 'N': null
+};
+const MOUTH_EXPRESSIONS = ['aa', 'ih', 'ou', 'ee', 'oh'];
+const VOICED_INTENSITY = 0.8;
+const UNVOICED_INTENSITY = 0.3;
+
+const lipSync = {
+  active: false,
+  visemes: [],
+  audioCtx: null,
+  startTime: 0,
+  currentIndex: 0,
+};
+
+function startLipSync(visemes, audioCtx, startTime) {
+  lipSync.active = true;
+  lipSync.visemes = visemes;
+  lipSync.audioCtx = audioCtx;
+  lipSync.startTime = startTime;
+  lipSync.currentIndex = 0;
+}
+
+function stopLipSync() {
+  lipSync.active = false;
+  if (currentVrm && currentVrm.expressionManager) {
+    for (const expr of MOUTH_EXPRESSIONS) {
+      currentVrm.expressionManager.setValue(expr, 0);
+    }
+  }
+}
+
+function updateLipSync() {
+  if (!lipSync.active || !currentVrm || !currentVrm.expressionManager) return;
+
+  const elapsed = lipSync.audioCtx.currentTime - lipSync.startTime;
+  const visemes = lipSync.visemes;
+
+  // advance index
+  while (
+    lipSync.currentIndex < visemes.length - 1 &&
+    visemes[lipSync.currentIndex + 1].t <= elapsed
+  ) {
+    lipSync.currentIndex++;
+  }
+
+  if (lipSync.currentIndex >= visemes.length) {
+    stopLipSync();
+    return;
+  }
+
+  const v = visemes[lipSync.currentIndex];
+
+  // reset all mouth shapes
+  for (const expr of MOUTH_EXPRESSIONS) {
+    currentVrm.expressionManager.setValue(expr, 0);
+  }
+
+  if (elapsed >= v.t && elapsed <= v.t + v.dur) {
+    const target = VISEME_MAP[v.v];
+    const intensity = v.unvoiced ? UNVOICED_INTENSITY : VOICED_INTENSITY;
+
+    // smooth envelope (attack 15%, sustain, release 15%)
+    const progress = (elapsed - v.t) / v.dur;
+    let envelope;
+    if (progress < 0.15) {
+      envelope = progress / 0.15;
+    } else if (progress > 0.85) {
+      envelope = (1.0 - progress) / 0.15;
+    } else {
+      envelope = 1.0;
+    }
+
+    if (target) {
+      currentVrm.expressionManager.setValue(target, intensity * Math.max(0, envelope));
+    }
+  }
+}
+
+// ===== Blink Animation =====
+let blinkTimer = 0;
+let blinkPhase = 0; // 0=open, 1=closing, 2=opening
+let nextBlinkIn = 2 + Math.random() * 4;
+
+function updateBlink(delta) {
+  if (!currentVrm || !currentVrm.expressionManager) return;
+
+  blinkTimer += delta;
+
+  if (blinkPhase === 0 && blinkTimer >= nextBlinkIn) {
+    blinkPhase = 1;
+    blinkTimer = 0;
+  }
+
+  if (blinkPhase === 1) {
+    const v = Math.min(blinkTimer / 0.05, 1.0);
+    currentVrm.expressionManager.setValue('blink', v);
+    if (v >= 1.0) { blinkPhase = 2; blinkTimer = 0; }
+  }
+
+  if (blinkPhase === 2) {
+    const v = 1.0 - Math.min(blinkTimer / 0.1, 1.0);
+    currentVrm.expressionManager.setValue('blink', v);
+    if (v <= 0) {
+      blinkPhase = 0;
+      blinkTimer = 0;
+      nextBlinkIn = 2 + Math.random() * 4;
+    }
+  }
+}
+
+// ===== Animation Loop =====
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = clock.getDelta();
+  if (currentVrm) {
+    updateLipSync();
+    updateBlink(delta);
+    currentVrm.update(delta);
+  }
+  renderer.render(scene, camera);
+}
+
+animate();
+
+// ===== Audio Context (created on user gesture) =====
+let audioContext = null;
+
+function getAudioContext() {
+  if (!audioContext) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  return audioContext;
+}
+
+// ===== Recording =====
+let mediaRecorder, chunks = [], recording = false;
+
+btn.addEventListener('click', toggle);
 
 async function toggle() {
-  if (recording) { stop(); return; }
+  if (recording) { stopRecording(); return; }
   try {
+    getAudioContext(); // ensure AudioContext is created on user gesture
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
     chunks = [];
@@ -52,60 +368,92 @@ async function toggle() {
     };
     mediaRecorder.start();
     recording = true;
-    btn.textContent = 'Stop';
-    btn.className = 'recording';
-    status.textContent = '録音中...';
+    setState('LISTENING');
   } catch (e) {
-    status.textContent = 'マイクを許可してください';
+    setState('ERROR', 'Microphone access denied');
+    setTimeout(() => setState('IDLE'), 3000);
   }
 }
 
-function stop() {
+function stopRecording() {
   mediaRecorder.stop();
   recording = false;
-  btn.textContent = '...';
-  btn.className = 'processing';
-  status.textContent = '処理中（STT → LLM → TTS）...';
+  setState('THINKING');
 }
 
+// ===== Send to API & Play Response =====
 async function send(blob) {
-  // webm → wav 変換 (ブラウザ側)
   const wav = await webmToWav(blob);
   const form = new FormData();
   form.append('file', wav, 'input.wav');
+
   try {
     const res = await fetch('/api/coach', { method: 'POST', body: form });
     if (!res.ok) {
       const err = await res.json();
       throw new Error(err.detail || res.statusText);
     }
-    const userText = decodeURIComponent(res.headers.get('X-User-Text') || '');
-    const coachText = decodeURIComponent(res.headers.get('X-Coach-Text') || '');
-    texts.innerHTML = `<div class="you"><span>あなた:</span> ${userText}</div><div class="coach"><span>コーチ:</span> ${coachText}</div>`;
-    const audioBlob = await res.blob();
-    const url = URL.createObjectURL(audioBlob);
-    player.src = url;
-    player.style.display = 'block';
-    player.play();
-    status.textContent = '';
+    const data = await res.json();
+
+    // Display transcript
+    textsEl.innerHTML =
+      `<div class="you"><span class="label">You:</span> ${escapeHtml(data.user_text)}</div>` +
+      `<div class="coach"><span class="label">Coach:</span> ${escapeHtml(data.coach_text)}</div>`;
+
+    // Decode audio from base64
+    const binaryStr = atob(data.audio_base64);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+
+    // Play audio with lip sync
+    setState('SPEAKING');
+    await playWithLipSync(bytes.buffer, data.visemes);
+    setState('IDLE');
+
   } catch (e) {
-    status.textContent = 'エラー: ' + e.message;
+    setState('ERROR', e.message);
+    setTimeout(() => setState('IDLE'), 3000);
   }
-  btn.textContent = 'Push to Talk';
-  btn.className = '';
+}
+
+async function playWithLipSync(arrayBuffer, visemes) {
+  const ctx = getAudioContext();
+  const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+
+  const source = ctx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(ctx.destination);
+
+  const startTime = ctx.currentTime;
+  source.start(startTime);
+  startLipSync(visemes, ctx, startTime);
+
+  return new Promise((resolve) => {
+    source.onended = () => {
+      stopLipSync();
+      resolve();
+    };
+  });
+}
+
+// ===== Utilities =====
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
 }
 
 async function webmToWav(blob) {
-  const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
   const arrayBuf = await blob.arrayBuffer();
-  const decoded = await audioCtx.decodeAudioData(arrayBuf);
+  const decoded = await ctx.decodeAudioData(arrayBuf);
   const samples = decoded.getChannelData(0);
-  // float32 → int16
   const int16 = new Int16Array(samples.length);
   for (let i = 0; i < samples.length; i++) {
     int16[i] = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32767)));
   }
-  // WAV header
   const buf = new ArrayBuffer(44 + int16.byteLength);
   const view = new DataView(buf);
   const sr = 16000;
@@ -123,7 +471,7 @@ async function webmToWav(blob) {
   writeStr(view, 36, 'data');
   view.setUint32(40, int16.byteLength, true);
   new Int16Array(buf, 44).set(int16);
-  audioCtx.close();
+  ctx.close();
   return new Blob([buf], { type: 'audio/wav' });
 }
 
