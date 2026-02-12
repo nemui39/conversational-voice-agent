@@ -94,14 +94,14 @@ def coach(
     })
 
 
-@app.websocket("/ws/rtc")
-async def rtc_ws(websocket: WebSocket):
-    """WebRTC シグナリング用 WebSocket エンドポイント。"""
-    from voice_agent.rtc import handle_rtc_session
+@app.websocket("/ws/audio")
+async def ws_audio(websocket: WebSocket):
+    """音声ストリーミング用 WebSocket エンドポイント。"""
+    from voice_agent.rtc import handle_ws_session
 
     await websocket.accept()
     try:
-        await handle_rtc_session(websocket)
+        await handle_ws_session(websocket)
     except WebSocketDisconnect:
         pass
 

@@ -414,12 +414,38 @@ function animate() {
 
 animate();
 
-// ===== WebRTC Connection =====
-let peerConnection = null;
-let websocket = null;
+// ===== WebSocket Audio Connection =====
+let ws = null;
+let audioCtx = null;
+let micStream = null;
+let workletNode = null;
 let connected = false;
 let pendingVisemes = null;
-let remoteAudio = null;
+let currentAudioSource = null;
+
+// AudioWorklet プロセッサ（100ms バッファで PCM を送信）
+const PROCESSOR_CODE = `
+class PCMCapture extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.buffer = new Float32Array(4800);
+    this.offset = 0;
+  }
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      this.buffer[this.offset++] = ch[i];
+      if (this.offset >= 4800) {
+        this.port.postMessage(this.buffer.slice(0, 4800));
+        this.offset = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-capture', PCMCapture);
+`;
 
 btn.addEventListener('click', toggleConnection);
 
@@ -438,99 +464,105 @@ async function connect() {
 
   try {
     // マイク取得
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    // AudioContext（48kHz でサーバー VAD と一致させる）
+    audioCtx = new AudioContext({ sampleRate: 48000 });
+
+    // AudioWorklet でマイク音声をキャプチャ
+    const blob = new Blob([PROCESSOR_CODE], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    await audioCtx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+
+    const source = audioCtx.createMediaStreamSource(micStream);
+    workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture');
+    source.connect(workletNode);
 
     // WebSocket 接続
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    websocket = new WebSocket(`${protocol}//${location.host}/ws/rtc`);
+    ws = new WebSocket(`${protocol}//${location.host}/ws/audio`);
+    ws.binaryType = 'arraybuffer';
 
     await new Promise((resolve, reject) => {
-      websocket.onopen = resolve;
-      websocket.onerror = reject;
+      ws.onopen = resolve;
+      ws.onerror = reject;
     });
 
-    // RTCPeerConnection
-    peerConnection = new RTCPeerConnection();
-
-    // マイク音声をトラック追加
-    stream.getAudioTracks().forEach(t => peerConnection.addTrack(t, stream));
-
-    // リモート音声トラック受信
-    peerConnection.ontrack = (e) => {
-      console.log('Remote track received:', e.track.kind);
-      if (e.track.kind === 'audio') {
-        remoteAudio = new Audio();
-        remoteAudio.srcObject = new MediaStream([e.track]);
-        remoteAudio.play().catch(err => console.warn('Audio autoplay blocked:', err));
+    // マイク音声を int16 PCM で WebSocket 送信
+    workletNode.port.onmessage = (e) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const float32 = e.data;
+      const int16 = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        const s = Math.max(-1, Math.min(1, float32[i]));
+        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
       }
+      ws.send(int16.buffer);
     };
 
-    // DataChannel 受信
-    peerConnection.ondatachannel = (e) => {
-      console.log('DataChannel received:', e.channel.label);
-      const channel = e.channel;
+    // サーバーからのメッセージ受信
+    ws.onmessage = async (e) => {
+      if (typeof e.data === 'string') {
+        // JSON テキストメッセージ
+        const msg = JSON.parse(e.data);
 
-      channel.onmessage = (msg) => {
-        const data = JSON.parse(msg.data);
+        if (msg.type === 'state') {
+          setState(msg.state);
 
-        if (data.type === 'state') {
-          setState(data.state);
+          if (msg.state === 'SPEAKING' && pendingVisemes) {
+            startLipSync(pendingVisemes);
+            pendingVisemes = null;
+          }
+        }
 
-          if (data.state === 'SPEAKING' && pendingVisemes) {
+        if (msg.type === 'visemes') {
+          pendingVisemes = msg.data;
+        }
+
+        if (msg.type === 'result') {
+          textsEl.innerHTML =
+            `<div class="you"><span class="label">You:</span> ${escapeHtml(msg.user_text)}</div>` +
+            `<div class="coach"><span class="label">Coach:</span> ${escapeHtml(msg.coach_text)}</div>`;
+        }
+      } else {
+        // バイナリ = WAV 音声（TTS 応答）
+        try {
+          if (currentAudioSource) {
+            currentAudioSource.onended = null;
+            currentAudioSource.stop();
+          }
+
+          const audioBuffer = await audioCtx.decodeAudioData(e.data.slice(0));
+          const bufferSource = audioCtx.createBufferSource();
+          bufferSource.buffer = audioBuffer;
+          bufferSource.connect(audioCtx.destination);
+          currentAudioSource = bufferSource;
+
+          // リップシンク開始
+          if (pendingVisemes) {
             startLipSync(pendingVisemes);
             pendingVisemes = null;
           }
 
-          if (data.state === 'IDLE') {
-            stopLipSync();
-          }
+          bufferSource.start();
+
+          // 再生完了で IDLE に戻す
+          bufferSource.onended = () => {
+            if (currentAudioSource === bufferSource) {
+              currentAudioSource = null;
+              stopLipSync();
+              setState('IDLE');
+            }
+          };
+        } catch (err) {
+          console.error('Audio decode error:', err);
+          setState('IDLE');
         }
-
-        if (data.type === 'visemes') {
-          pendingVisemes = data.data;
-        }
-
-        if (data.type === 'result') {
-          textsEl.innerHTML =
-            `<div class="you"><span class="label">You:</span> ${escapeHtml(data.user_text)}</div>` +
-            `<div class="coach"><span class="label">Coach:</span> ${escapeHtml(data.coach_text)}</div>`;
-        }
-      };
-    };
-
-    // SDP offer 生成 → WebSocket 送信
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-
-    // ICE 候補収集完了を待つ
-    await new Promise((resolve) => {
-      if (peerConnection.iceGatheringState === 'complete') {
-        resolve();
-      } else {
-        peerConnection.onicegatheringstatechange = () => {
-          if (peerConnection.iceGatheringState === 'complete') resolve();
-        };
-      }
-    });
-
-    websocket.send(JSON.stringify({
-      type: 'offer',
-      sdp: peerConnection.localDescription.sdp,
-    }));
-
-    // SDP answer 受信
-    websocket.onmessage = async (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'answer') {
-        await peerConnection.setRemoteDescription({
-          type: 'answer',
-          sdp: msg.sdp,
-        });
-        console.log('WebRTC connection established');
       }
     };
 
-    websocket.onclose = () => {
+    ws.onclose = () => {
       if (connected) disconnect();
     };
 
@@ -549,20 +581,26 @@ async function connect() {
 }
 
 function disconnect() {
-  if (peerConnection) {
-    peerConnection.getSenders().forEach(sender => {
-      if (sender.track) sender.track.stop();
-    });
-    peerConnection.close();
-    peerConnection = null;
+  if (currentAudioSource) {
+    currentAudioSource.onended = null;
+    try { currentAudioSource.stop(); } catch (e) {}
+    currentAudioSource = null;
   }
-  if (websocket) {
-    websocket.close();
-    websocket = null;
+  if (workletNode) {
+    workletNode.disconnect();
+    workletNode = null;
   }
-  if (remoteAudio) {
-    remoteAudio.srcObject = null;
-    remoteAudio = null;
+  if (audioCtx) {
+    audioCtx.close();
+    audioCtx = null;
+  }
+  if (micStream) {
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
+  }
+  if (ws) {
+    ws.close();
+    ws = null;
   }
 
   stopLipSync();
