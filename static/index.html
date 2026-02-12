@@ -112,6 +112,9 @@ const stateLabel = document.getElementById('state-label');
 const btn = document.getElementById('btn');
 const textsEl = document.getElementById('texts');
 
+// ===== Shared State =====
+let currentVrm = null;
+
 // ===== State Machine =====
 const STATES = {
   IDLE:      { label: 'Ready',        icon: '\u25CF', color: '#4ade80' },
@@ -136,6 +139,21 @@ function setState(newState, detail) {
   } else {
     btn.textContent = 'Push to Talk';
     btn.classList.remove('recording');
+  }
+  // 状態ごとの表情を設定
+  updateStateExpression(newState);
+}
+
+function updateStateExpression(state) {
+  if (!currentVrm || !currentVrm.expressionManager) return;
+  // リセット
+  currentVrm.expressionManager.setValue('neutral', 0);
+  currentVrm.expressionManager.setValue('relaxed', 0);
+  if (state === 'THINKING') {
+    // 真剣な表情（あれば）
+    currentVrm.expressionManager.setValue('neutral', 0.3);
+  } else if (state === 'IDLE') {
+    currentVrm.expressionManager.setValue('relaxed', 0.2);
   }
 }
 
@@ -171,8 +189,6 @@ resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
 
 // ===== VRM Loading =====
-let currentVrm = null;
-
 const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
 
@@ -294,8 +310,21 @@ function updateLipSync() {
       envelope = 1.0;
     }
 
+    const value = intensity * Math.max(0, envelope);
+
     if (target) {
-      currentVrm.expressionManager.setValue(target, intensity * Math.max(0, envelope));
+      currentVrm.expressionManager.setValue(target, value);
+    }
+
+    // Coarticulation: 次のビセムを少し混ぜて遷移を滑らかにする
+    const COARTIC_BLEND = 0.15;
+    if (progress > 0.7 && lipSync.currentIndex < visemes.length - 1) {
+      const nextV = visemes[lipSync.currentIndex + 1];
+      const nextTarget = VISEME_MAP[nextV.v];
+      if (nextTarget && nextTarget !== target) {
+        const blend = ((progress - 0.7) / 0.3) * COARTIC_BLEND * intensity;
+        currentVrm.expressionManager.setValue(nextTarget, blend);
+      }
     }
   }
 }
@@ -332,6 +361,34 @@ function updateBlink(delta) {
   }
 }
 
+// ===== Idle Breathing & Speaking Nod =====
+let animElapsed = 0;
+
+function updateIdleBreathing(delta) {
+  if (!currentVrm) return;
+  animElapsed += delta;
+
+  const head = currentVrm.humanoid.getNormalizedBoneNode('head');
+  const spine = currentVrm.humanoid.getNormalizedBoneNode('spine');
+
+  if (currentState === 'IDLE' || currentState === 'LISTENING') {
+    // 呼吸: 頭とspineのわずかな上下揺れ
+    if (spine) spine.rotation.x = Math.sin(animElapsed * 0.8) * 0.003;
+    if (head) head.rotation.x = Math.sin(animElapsed * 1.0) * 0.002;
+    if (head) head.rotation.y = 0;
+  } else if (currentState === 'SPEAKING' && lipSync.active) {
+    // 発話中: 軽い頷き（ビセムのタイミングに合わせて揺れる）
+    const elapsed = lipSync.audioCtx.currentTime - lipSync.startTime;
+    if (head) head.rotation.x = Math.sin(elapsed * 3.5) * 0.015;
+    if (head) head.rotation.y = Math.sin(elapsed * 1.8) * 0.008;
+    if (spine) spine.rotation.x = Math.sin(elapsed * 2.0) * 0.005;
+  } else {
+    // THINKING等: 静止
+    if (head) { head.rotation.x = 0; head.rotation.y = 0; }
+    if (spine) spine.rotation.x = 0;
+  }
+}
+
 // ===== Animation Loop =====
 const clock = new THREE.Clock();
 
@@ -341,6 +398,7 @@ function animate() {
   if (currentVrm) {
     updateLipSync();
     updateBlink(delta);
+    updateIdleBreathing(delta);
     currentVrm.update(delta);
   }
   renderer.render(scene, camera);
