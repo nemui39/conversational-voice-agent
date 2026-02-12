@@ -64,7 +64,9 @@
   }
   #btn:hover:not(:disabled) { transform: scale(1.05); }
   #btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  #btn.recording { background: #ff6b6b; animation: pulse 1s infinite; }
+  #btn.connected { background: #4ade80; }
+  #btn.connected:hover:not(:disabled) { background: #f87171; }
+  #btn.connecting { background: #fbbf24; animation: pulse 1s infinite; }
   @keyframes pulse {
     0%,100% { box-shadow: 0 0 0 0 rgba(233,69,96,0.4); }
     50% { box-shadow: 0 0 0 20px rgba(233,69,96,0); }
@@ -95,7 +97,7 @@
     <span id="state-label"></span>
   </div>
   <br>
-  <button id="btn">Push to Talk</button>
+  <button id="btn">Connect</button>
   <div id="texts"></div>
 </div>
 
@@ -129,28 +131,18 @@ let currentState = 'IDLE';
 function setState(newState, detail) {
   currentState = newState;
   const s = STATES[newState];
+  if (!s) return;
   stateIcon.textContent = s.icon;
   stateIcon.style.color = s.color;
   stateLabel.textContent = detail || s.label;
-  btn.disabled = (newState === 'THINKING' || newState === 'SPEAKING');
-  if (newState === 'LISTENING') {
-    btn.textContent = 'Stop';
-    btn.classList.add('recording');
-  } else {
-    btn.textContent = 'Push to Talk';
-    btn.classList.remove('recording');
-  }
-  // 状態ごとの表情を設定
   updateStateExpression(newState);
 }
 
 function updateStateExpression(state) {
   if (!currentVrm || !currentVrm.expressionManager) return;
-  // リセット
   currentVrm.expressionManager.setValue('neutral', 0);
   currentVrm.expressionManager.setValue('relaxed', 0);
   if (state === 'THINKING') {
-    // 真剣な表情（あれば）
     currentVrm.expressionManager.setValue('neutral', 0.3);
   } else if (state === 'IDLE') {
     currentVrm.expressionManager.setValue('relaxed', 0.2);
@@ -199,19 +191,16 @@ loader.load(
     VRMUtils.removeUnnecessaryVertices(gltf.scene);
     VRMUtils.removeUnnecessaryJoints(gltf.scene);
 
-    // VRM 0.x は +Z を向いているので 180度回転させてカメラに正対させる
     vrm.scene.rotation.y = Math.PI;
 
     scene.add(vrm.scene);
     currentVrm = vrm;
 
-    // Tポーズから自然な姿勢に腕を下ろす
     const leftUpperArm = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
     const rightUpperArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
-    if (leftUpperArm) leftUpperArm.rotation.z = 1.2;   // 約70度下げる
+    if (leftUpperArm) leftUpperArm.rotation.z = 1.2;
     if (rightUpperArm) rightUpperArm.rotation.z = -1.2;
 
-    // head ボーンの位置でカメラを自動調整（口元が見えるアップ）
     const headNode = vrm.humanoid.getNormalizedBoneNode('head');
     if (headNode) {
       const headPos = new THREE.Vector3();
@@ -247,16 +236,14 @@ const UNVOICED_INTENSITY = 0.3;
 const lipSync = {
   active: false,
   visemes: [],
-  audioCtx: null,
   startTime: 0,
   currentIndex: 0,
 };
 
-function startLipSync(visemes, audioCtx, startTime) {
+function startLipSync(visemes) {
   lipSync.active = true;
   lipSync.visemes = visemes;
-  lipSync.audioCtx = audioCtx;
-  lipSync.startTime = startTime;
+  lipSync.startTime = performance.now() / 1000;
   lipSync.currentIndex = 0;
 }
 
@@ -269,13 +256,16 @@ function stopLipSync() {
   }
 }
 
+function getLipSyncElapsed() {
+  return performance.now() / 1000 - lipSync.startTime;
+}
+
 function updateLipSync() {
   if (!lipSync.active || !currentVrm || !currentVrm.expressionManager) return;
 
-  const elapsed = lipSync.audioCtx.currentTime - lipSync.startTime;
+  const elapsed = getLipSyncElapsed();
   const visemes = lipSync.visemes;
 
-  // advance index
   while (
     lipSync.currentIndex < visemes.length - 1 &&
     visemes[lipSync.currentIndex + 1].t <= elapsed
@@ -290,7 +280,6 @@ function updateLipSync() {
 
   const v = visemes[lipSync.currentIndex];
 
-  // reset all mouth shapes
   for (const expr of MOUTH_EXPRESSIONS) {
     currentVrm.expressionManager.setValue(expr, 0);
   }
@@ -299,7 +288,6 @@ function updateLipSync() {
     const target = VISEME_MAP[v.v];
     const intensity = v.unvoiced ? UNVOICED_INTENSITY : VOICED_INTENSITY;
 
-    // smooth envelope (attack 15%, sustain, release 15%)
     const progress = (elapsed - v.t) / v.dur;
     let envelope;
     if (progress < 0.15) {
@@ -316,7 +304,6 @@ function updateLipSync() {
       currentVrm.expressionManager.setValue(target, value);
     }
 
-    // Coarticulation: 次のビセムを少し混ぜて遷移を滑らかにする
     const COARTIC_BLEND = 0.15;
     if (progress > 0.7 && lipSync.currentIndex < visemes.length - 1) {
       const nextV = visemes[lipSync.currentIndex + 1];
@@ -331,15 +318,14 @@ function updateLipSync() {
 
 // ===== Blink Animation =====
 let blinkTimer = 0;
-let blinkPhase = 0; // 0=open, 1=closing, 2=opening
-let blinksRemaining = 0; // 2連まばたき用カウンタ
+let blinkPhase = 0;
+let blinksRemaining = 0;
 let nextBlinkIn = 2 + Math.random() * 4;
 
 function getBlinkInterval() {
-  // 状態ごとに瞬き間隔を変える
-  if (currentState === 'THINKING') return 1.2 + Math.random() * 2.0; // 考え中は頻繁
+  if (currentState === 'THINKING') return 1.2 + Math.random() * 2.0;
   if (currentState === 'SPEAKING') return 2.0 + Math.random() * 3.0;
-  return 2.5 + Math.random() * 4.0; // IDLE/LISTENING
+  return 2.5 + Math.random() * 4.0;
 }
 
 function updateBlink(delta) {
@@ -350,7 +336,6 @@ function updateBlink(delta) {
   if (blinkPhase === 0 && blinkTimer >= nextBlinkIn) {
     blinkPhase = 1;
     blinkTimer = 0;
-    // 20%の確率で2連まばたき
     if (blinksRemaining <= 0) {
       blinksRemaining = Math.random() < 0.2 ? 2 : 1;
     }
@@ -368,9 +353,8 @@ function updateBlink(delta) {
     if (v <= 0) {
       blinksRemaining--;
       if (blinksRemaining > 0) {
-        // 2連まばたき: 短い間を空けてもう一回
         blinkPhase = 1;
-        blinkTimer = -0.08; // 80ms pause before next blink
+        blinkTimer = -0.08;
       } else {
         blinkPhase = 0;
         blinkTimer = 0;
@@ -383,9 +367,7 @@ function updateBlink(delta) {
 // ===== Idle Breathing & Speaking Nod =====
 let animElapsed = 0;
 
-// 呼吸の揺らぎ: ベース周期 + ゆっくり変化するノイズで周期・振幅を微妙に変える
 function breathNoise(t) {
-  // 2つの低周波sinを重ねて疑似ノイズ（黄金比で非周期的に）
   return Math.sin(t * 0.13) * 0.4 + Math.sin(t * 0.21 * 1.618) * 0.3;
 }
 
@@ -397,22 +379,19 @@ function updateIdleBreathing(delta) {
   const spine = currentVrm.humanoid.getNormalizedBoneNode('spine');
 
   if (currentState === 'IDLE' || currentState === 'LISTENING') {
-    // 呼吸: 周期と振幅に揺らぎを加える
     const noise = breathNoise(animElapsed);
-    const spineFreq = 0.8 + noise * 0.15;   // 0.74〜0.86 の間で揺らぐ
-    const spineAmp = 0.003 + noise * 0.001;  // 振幅も微変動
+    const spineFreq = 0.8 + noise * 0.15;
+    const spineAmp = 0.003 + noise * 0.001;
     const headFreq = 1.0 + noise * 0.1;
     if (spine) spine.rotation.x = Math.sin(animElapsed * spineFreq) * spineAmp;
     if (head) head.rotation.x = Math.sin(animElapsed * headFreq) * 0.002;
-    if (head) head.rotation.y = Math.sin(animElapsed * 0.3) * 0.003; // ごくわずかな首振り
+    if (head) head.rotation.y = Math.sin(animElapsed * 0.3) * 0.003;
   } else if (currentState === 'SPEAKING' && lipSync.active) {
-    // 発話中: 軽い頷き（ビセムのタイミングに合わせて揺れる）
-    const elapsed = lipSync.audioCtx.currentTime - lipSync.startTime;
+    const elapsed = getLipSyncElapsed();
     if (head) head.rotation.x = Math.sin(elapsed * 3.5) * 0.015;
     if (head) head.rotation.y = Math.sin(elapsed * 1.8) * 0.008;
     if (spine) spine.rotation.x = Math.sin(elapsed * 2.0) * 0.005;
   } else {
-    // THINKING等: 静止
     if (head) { head.rotation.x = 0; head.rotation.y = 0; }
     if (spine) spine.rotation.x = 0;
   }
@@ -435,103 +414,164 @@ function animate() {
 
 animate();
 
-// ===== Audio Context (created on user gesture) =====
-let audioContext = null;
+// ===== WebRTC Connection =====
+let peerConnection = null;
+let websocket = null;
+let connected = false;
+let pendingVisemes = null;
+let remoteAudio = null;
 
-function getAudioContext() {
-  if (!audioContext) {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+btn.addEventListener('click', toggleConnection);
+
+async function toggleConnection() {
+  if (connected) {
+    disconnect();
+  } else {
+    await connect();
   }
-  return audioContext;
 }
 
-// ===== Recording =====
-let mediaRecorder, chunks = [], recording = false;
+async function connect() {
+  btn.textContent = 'Connecting';
+  btn.classList.add('connecting');
+  btn.disabled = true;
 
-btn.addEventListener('click', toggle);
-
-async function toggle() {
-  if (recording) { stopRecording(); return; }
   try {
-    getAudioContext(); // ensure AudioContext is created on user gesture
+    // マイク取得
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-    chunks = [];
-    mediaRecorder.ondataavailable = e => chunks.push(e.data);
-    mediaRecorder.onstop = () => {
-      stream.getTracks().forEach(t => t.stop());
-      send(new Blob(chunks, { type: 'audio/webm' }));
+
+    // WebSocket 接続
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    websocket = new WebSocket(`${protocol}//${location.host}/ws/rtc`);
+
+    await new Promise((resolve, reject) => {
+      websocket.onopen = resolve;
+      websocket.onerror = reject;
+    });
+
+    // RTCPeerConnection
+    peerConnection = new RTCPeerConnection();
+
+    // マイク音声をトラック追加
+    stream.getAudioTracks().forEach(t => peerConnection.addTrack(t, stream));
+
+    // リモート音声トラック受信
+    peerConnection.ontrack = (e) => {
+      console.log('Remote track received:', e.track.kind);
+      if (e.track.kind === 'audio') {
+        remoteAudio = new Audio();
+        remoteAudio.srcObject = new MediaStream([e.track]);
+        remoteAudio.play().catch(err => console.warn('Audio autoplay blocked:', err));
+      }
     };
-    mediaRecorder.start();
-    recording = true;
-    setState('LISTENING');
+
+    // DataChannel 受信
+    peerConnection.ondatachannel = (e) => {
+      console.log('DataChannel received:', e.channel.label);
+      const channel = e.channel;
+
+      channel.onmessage = (msg) => {
+        const data = JSON.parse(msg.data);
+
+        if (data.type === 'state') {
+          setState(data.state);
+
+          if (data.state === 'SPEAKING' && pendingVisemes) {
+            startLipSync(pendingVisemes);
+            pendingVisemes = null;
+          }
+
+          if (data.state === 'IDLE') {
+            stopLipSync();
+          }
+        }
+
+        if (data.type === 'visemes') {
+          pendingVisemes = data.data;
+        }
+
+        if (data.type === 'result') {
+          textsEl.innerHTML =
+            `<div class="you"><span class="label">You:</span> ${escapeHtml(data.user_text)}</div>` +
+            `<div class="coach"><span class="label">Coach:</span> ${escapeHtml(data.coach_text)}</div>`;
+        }
+      };
+    };
+
+    // SDP offer 生成 → WebSocket 送信
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+
+    // ICE 候補収集完了を待つ
+    await new Promise((resolve) => {
+      if (peerConnection.iceGatheringState === 'complete') {
+        resolve();
+      } else {
+        peerConnection.onicegatheringstatechange = () => {
+          if (peerConnection.iceGatheringState === 'complete') resolve();
+        };
+      }
+    });
+
+    websocket.send(JSON.stringify({
+      type: 'offer',
+      sdp: peerConnection.localDescription.sdp,
+    }));
+
+    // SDP answer 受信
+    websocket.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'answer') {
+        await peerConnection.setRemoteDescription({
+          type: 'answer',
+          sdp: msg.sdp,
+        });
+        console.log('WebRTC connection established');
+      }
+    };
+
+    websocket.onclose = () => {
+      if (connected) disconnect();
+    };
+
+    connected = true;
+    btn.textContent = 'Disconnect';
+    btn.classList.remove('connecting');
+    btn.classList.add('connected');
+    btn.disabled = false;
+
   } catch (e) {
-    setState('ERROR', 'Microphone access denied');
+    console.error('Connection error:', e);
+    setState('ERROR', e.message || 'Connection failed');
+    disconnect();
     setTimeout(() => setState('IDLE'), 3000);
   }
 }
 
-function stopRecording() {
-  mediaRecorder.stop();
-  recording = false;
-  setState('THINKING');
-}
-
-// ===== Send to API & Play Response =====
-async function send(blob) {
-  const wav = await webmToWav(blob);
-  const form = new FormData();
-  form.append('file', wav, 'input.wav');
-
-  try {
-    const res = await fetch('/api/coach', { method: 'POST', body: form });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || res.statusText);
-    }
-    const data = await res.json();
-
-    // Display transcript
-    textsEl.innerHTML =
-      `<div class="you"><span class="label">You:</span> ${escapeHtml(data.user_text)}</div>` +
-      `<div class="coach"><span class="label">Coach:</span> ${escapeHtml(data.coach_text)}</div>`;
-
-    // Decode audio from base64
-    const binaryStr = atob(data.audio_base64);
-    const bytes = new Uint8Array(binaryStr.length);
-    for (let i = 0; i < binaryStr.length; i++) {
-      bytes[i] = binaryStr.charCodeAt(i);
-    }
-
-    // Play audio with lip sync
-    setState('SPEAKING');
-    await playWithLipSync(bytes.buffer, data.visemes);
-    setState('IDLE');
-
-  } catch (e) {
-    setState('ERROR', e.message);
-    setTimeout(() => setState('IDLE'), 3000);
+function disconnect() {
+  if (peerConnection) {
+    peerConnection.getSenders().forEach(sender => {
+      if (sender.track) sender.track.stop();
+    });
+    peerConnection.close();
+    peerConnection = null;
   }
-}
+  if (websocket) {
+    websocket.close();
+    websocket = null;
+  }
+  if (remoteAudio) {
+    remoteAudio.srcObject = null;
+    remoteAudio = null;
+  }
 
-async function playWithLipSync(arrayBuffer, visemes) {
-  const ctx = getAudioContext();
-  const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-
-  const source = ctx.createBufferSource();
-  source.buffer = audioBuffer;
-  source.connect(ctx.destination);
-
-  const startTime = ctx.currentTime;
-  source.start(startTime);
-  startLipSync(visemes, ctx, startTime);
-
-  return new Promise((resolve) => {
-    source.onended = () => {
-      stopLipSync();
-      resolve();
-    };
-  });
+  stopLipSync();
+  connected = false;
+  pendingVisemes = null;
+  btn.textContent = 'Connect';
+  btn.classList.remove('connected', 'connecting');
+  btn.disabled = false;
+  setState('IDLE');
 }
 
 // ===== Utilities =====
@@ -539,40 +579,6 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
-}
-
-async function webmToWav(blob) {
-  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-  const arrayBuf = await blob.arrayBuffer();
-  const decoded = await ctx.decodeAudioData(arrayBuf);
-  const samples = decoded.getChannelData(0);
-  const int16 = new Int16Array(samples.length);
-  for (let i = 0; i < samples.length; i++) {
-    int16[i] = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32767)));
-  }
-  const buf = new ArrayBuffer(44 + int16.byteLength);
-  const view = new DataView(buf);
-  const sr = 16000;
-  writeStr(view, 0, 'RIFF');
-  view.setUint32(4, 36 + int16.byteLength, true);
-  writeStr(view, 8, 'WAVE');
-  writeStr(view, 12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sr, true);
-  view.setUint32(28, sr * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeStr(view, 36, 'data');
-  view.setUint32(40, int16.byteLength, true);
-  new Int16Array(buf, 44).set(int16);
-  ctx.close();
-  return new Blob([buf], { type: 'audio/wav' });
-}
-
-function writeStr(view, offset, str) {
-  for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
 }
 </script>
 </body>

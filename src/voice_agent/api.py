@@ -12,7 +12,7 @@ import wave
 
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -25,7 +25,7 @@ from voice_agent.viseme import extract_visemes
 
 load_dotenv()
 
-app = FastAPI(title="Conversational Voice Agent", version="0.2.0")
+app = FastAPI(title="Conversational Voice Agent", version="0.3.0")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 
@@ -92,6 +92,18 @@ def coach(
         "sample_rate": audio_query.get("outputSamplingRate", 24000),
         "visemes": visemes,
     })
+
+
+@app.websocket("/ws/rtc")
+async def rtc_ws(websocket: WebSocket):
+    """WebRTC シグナリング用 WebSocket エンドポイント。"""
+    from voice_agent.rtc import handle_rtc_session
+
+    await websocket.accept()
+    try:
+        await handle_rtc_session(websocket)
+    except WebSocketDisconnect:
+        pass
 
 
 # 静的ファイル配信（VRMモデル等）— ルート定義の後にマウント
