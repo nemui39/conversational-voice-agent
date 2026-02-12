@@ -27,12 +27,16 @@ _VAD_FRAME_MS = 20
 
 
 def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    """線形補間でリサンプルする。"""
+    """polyphase フィルタでリサンプルする（子音の歪みを防ぐ）。"""
     if src_rate == dst_rate:
         return audio
-    target_len = int(len(audio) * dst_rate / src_rate)
-    indices = np.round(np.linspace(0, len(audio) - 1, target_len)).astype(int)
-    return audio[indices]
+    from math import gcd
+    from scipy.signal import resample_poly
+
+    g = gcd(src_rate, dst_rate)
+    up, down = dst_rate // g, src_rate // g
+    y = resample_poly(audio.astype(np.float32), up, down)
+    return np.clip(y, -32768, 32767).astype(np.int16)
 
 
 def _run_pipeline(pcm_48k: bytes) -> dict:

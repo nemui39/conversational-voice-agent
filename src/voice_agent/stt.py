@@ -45,6 +45,20 @@ def _get_model() -> WhisperModel:
     return _model
 
 
+def _preprocess(audio: np.ndarray) -> np.ndarray:
+    """DC除去 + RMS正規化 + 極小音量ゲート。"""
+    x = audio.astype(np.float32)
+    x -= x.mean()
+
+    rms = np.sqrt(np.mean(x * x) + 1e-9)
+    if rms < 200:
+        return np.array([], dtype=np.int16)
+
+    gain = np.clip(3000.0 / rms, 0.2, 6.0)
+    x *= gain
+    return np.clip(x, -32768, 32767).astype(np.int16)
+
+
 def transcribe(audio: np.ndarray, language: str = "ja") -> str:
     """音声データをテキストに変換する。
 
@@ -58,6 +72,11 @@ def transcribe(audio: np.ndarray, language: str = "ja") -> str:
     if len(audio) == 0:
         return ""
 
+    audio = _preprocess(audio)
+    if len(audio) == 0:
+        logger.debug("Audio too quiet, skipping STT")
+        return ""
+
     # faster-whisper は float32 (-1.0 ~ 1.0) を期待する
     audio_f32 = audio.astype(np.float32) / 32768.0
 
@@ -65,8 +84,12 @@ def transcribe(audio: np.ndarray, language: str = "ja") -> str:
     segments, info = model.transcribe(
         audio_f32,
         language=language,
-        beam_size=5,
+        beam_size=3,
+        temperature=0.0,
+        condition_on_previous_text=False,
         vad_filter=False,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
     )
 
     # no_speech_prob が高いセグメントを除外（ハルシネーション対策）
