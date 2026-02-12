@@ -5,14 +5,34 @@ faster-whisper を使って音声をテキストに変換する。
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 from faster_whisper import WhisperModel
 
 from voice_agent.config import SAMPLE_RATE
 
+logger = logging.getLogger(__name__)
+
 _model: WhisperModel | None = None
 
 MODEL_SIZE = "small"
+
+# Whisper が無音/ノイズから捏造する既知のフレーズ
+_HALLUCINATIONS = {
+    "ご視聴ありがとうございました",
+    "ご視聴いただきありがとうございます",
+    "ご視聴ありがとうございます",
+    "チャンネル登録お願いします",
+    "チャンネル登録よろしくお願いします",
+    "おまかせあれ",
+    "お疲れ様でした",
+    "ではまた",
+    "またね",
+}
+
+# no_speech_prob がこの閾値を超えるセグメントは無視する
+_NO_SPEECH_THRESHOLD = 0.6
 
 
 def _get_model() -> WhisperModel:
@@ -46,8 +66,22 @@ def transcribe(audio: np.ndarray, language: str = "ja") -> str:
         audio_f32,
         language=language,
         beam_size=5,
-        vad_filter=True,
+        vad_filter=False,
     )
 
-    text = "".join(seg.text for seg in segments).strip()
+    # no_speech_prob が高いセグメントを除外（ハルシネーション対策）
+    texts = []
+    for seg in segments:
+        if seg.no_speech_prob > _NO_SPEECH_THRESHOLD:
+            logger.debug(f"Skipping segment (no_speech_prob={seg.no_speech_prob:.2f}): {seg.text}")
+            continue
+        texts.append(seg.text)
+
+    text = "".join(texts).strip()
+
+    # 既知のハルシネーションパターンを弾く
+    if text in _HALLUCINATIONS:
+        logger.info(f"Filtered hallucination: {text}")
+        return ""
+
     return text

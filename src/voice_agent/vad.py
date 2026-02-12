@@ -21,7 +21,7 @@ class SpeechDetector:
     def __init__(
         self,
         sample_rate: int = 48000,
-        silence_duration: float = 0.6,
+        silence_duration: float = 0.4,
         aggressiveness: int = 2,
         min_speech_ms: int = 300,
     ):
@@ -76,6 +76,10 @@ class SpeechDetector:
     def is_speaking(self) -> bool:
         """現在発話中かどうか。"""
         return self._speaking
+
+    def get_speech_buffer(self) -> bytes:
+        """現在バッファに溜まっている発話音声を返す（コピー）。"""
+        return b"".join(self._buffer)
 
     def reset(self) -> None:
         """内部状態をリセットする。"""

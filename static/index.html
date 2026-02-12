@@ -77,6 +77,7 @@
   .you, .coach { padding: 0.3rem 0; line-height: 1.5; }
   .you .label { color: #888; }
   .coach .label { color: #e94560; }
+  .partial { opacity: 0.6; font-style: italic; }
 </style>
 <script type="importmap">
 {
@@ -422,6 +423,7 @@ let workletNode = null;
 let connected = false;
 let pendingVisemes = null;
 let currentAudioSource = null;
+let micMuted = false;  // THINKING〜再生完了までマイクを止める
 
 // AudioWorklet プロセッサ（100ms バッファで PCM を送信）
 const PROCESSOR_CODE = `
@@ -464,7 +466,9 @@ async function connect() {
 
   try {
     // マイク取得
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
 
     // AudioContext（48kHz でサーバー VAD と一致させる）
     audioCtx = new AudioContext({ sampleRate: 48000 });
@@ -490,8 +494,10 @@ async function connect() {
     });
 
     // マイク音声を int16 PCM で WebSocket 送信
+    // THINKING〜再生完了までマイクを送信しない
     workletNode.port.onmessage = (e) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (micMuted) return;
       const float32 = e.data;
       const int16 = new Int16Array(float32.length);
       for (let i = 0; i < float32.length; i++) {
@@ -510,10 +516,20 @@ async function connect() {
         if (msg.type === 'state') {
           setState(msg.state);
 
+          // TTS 再生中のみマイクを止める（エコー防止）
+          if (msg.state === 'SPEAKING') {
+            micMuted = true;
+          }
+
           if (msg.state === 'SPEAKING' && pendingVisemes) {
             startLipSync(pendingVisemes);
             pendingVisemes = null;
           }
+        }
+
+        if (msg.type === 'partial_text') {
+          textsEl.innerHTML =
+            `<div class="you partial"><span class="label">You:</span> ${escapeHtml(msg.text)}...</div>`;
         }
 
         if (msg.type === 'visemes') {
@@ -553,6 +569,8 @@ async function connect() {
               currentAudioSource = null;
               stopLipSync();
               setState('IDLE');
+              // 再生直後のノイズ拾いを防ぐため 500ms 後にマイク再開
+              setTimeout(() => { micMuted = false; }, 500);
             }
           };
         } catch (err) {

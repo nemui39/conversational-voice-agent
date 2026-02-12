@@ -81,6 +81,15 @@ def _to_vad_frames(pcm_bytes: bytes, sample_rate: int) -> list[bytes]:
     return frames
 
 
+def _transcribe_partial(pcm_48k: bytes) -> str:
+    """部分認識用 STT。スレッドプールで実行される。"""
+    from voice_agent.stt import transcribe
+
+    audio_48k = np.frombuffer(pcm_48k, dtype=np.int16)
+    audio_16k = _resample(audio_48k, _SAMPLE_RATE, _TARGET_SAMPLE_RATE)
+    return transcribe(audio_16k)
+
+
 async def _send_event(ws: WebSocket, event: dict) -> None:
     """WebSocket が接続中なら JSON を送信する。"""
     try:
@@ -100,8 +109,25 @@ async def handle_ws_session(websocket: WebSocket) -> None:
     detector = SpeechDetector(sample_rate=_SAMPLE_RATE)
     processing = False
     chunk_count = 0
+    last_partial_time = 0.0
+    partial_interval = 1.0  # 部分認識の間隔（秒）
+    partial_task: asyncio.Task | None = None
 
     logger.info("WebSocket audio session started")
+
+    async def _do_partial(speech_bytes: bytes) -> None:
+        """部分認識を実行してクライアントに送信する。"""
+        nonlocal partial_task
+        try:
+            loop = asyncio.get_event_loop()
+            text = await loop.run_in_executor(None, _transcribe_partial, speech_bytes)
+            if text:
+                logger.info(f"Partial STT: {text}")
+                await _send_event(websocket, {"type": "partial_text", "text": text})
+        except Exception as e:
+            logger.debug(f"Partial STT error: {e}")
+        finally:
+            partial_task = None
 
     try:
         while True:
@@ -122,8 +148,27 @@ async def handle_ws_session(websocket: WebSocket) -> None:
                 if detector.is_speaking and not processing and chunk_count % 25 == 0:
                     await _send_event(websocket, {"type": "state", "state": "LISTENING"})
 
+                # 発話中の部分認識（1秒ごと）
+                if (detector.is_speaking
+                        and not processing
+                        and partial_task is None):
+                    now = asyncio.get_event_loop().time()
+                    if now - last_partial_time >= partial_interval:
+                        last_partial_time = now
+                        speech_so_far = detector.get_speech_buffer()
+                        # 最低0.3秒分の音声がないとスキップ
+                        min_bytes = int(_SAMPLE_RATE * 2 * 0.3)
+                        if len(speech_so_far) > min_bytes:
+                            partial_task = asyncio.ensure_future(
+                                _do_partial(speech_so_far)
+                            )
+
                 if speech_data is not None:
                     processing = True
+                    last_partial_time = 0.0
+                    if partial_task and not partial_task.done():
+                        partial_task.cancel()
+                        partial_task = None
                     speech_duration = len(speech_data) / (_SAMPLE_RATE * 2)
                     logger.info(f"Speech detected: {speech_duration:.1f}s ({len(speech_data)} bytes)")
                     await _send_event(websocket, {"type": "state", "state": "THINKING"})
