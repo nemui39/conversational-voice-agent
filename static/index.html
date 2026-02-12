@@ -332,7 +332,15 @@ function updateLipSync() {
 // ===== Blink Animation =====
 let blinkTimer = 0;
 let blinkPhase = 0; // 0=open, 1=closing, 2=opening
+let blinksRemaining = 0; // 2連まばたき用カウンタ
 let nextBlinkIn = 2 + Math.random() * 4;
+
+function getBlinkInterval() {
+  // 状態ごとに瞬き間隔を変える
+  if (currentState === 'THINKING') return 1.2 + Math.random() * 2.0; // 考え中は頻繁
+  if (currentState === 'SPEAKING') return 2.0 + Math.random() * 3.0;
+  return 2.5 + Math.random() * 4.0; // IDLE/LISTENING
+}
 
 function updateBlink(delta) {
   if (!currentVrm || !currentVrm.expressionManager) return;
@@ -342,6 +350,10 @@ function updateBlink(delta) {
   if (blinkPhase === 0 && blinkTimer >= nextBlinkIn) {
     blinkPhase = 1;
     blinkTimer = 0;
+    // 20%の確率で2連まばたき
+    if (blinksRemaining <= 0) {
+      blinksRemaining = Math.random() < 0.2 ? 2 : 1;
+    }
   }
 
   if (blinkPhase === 1) {
@@ -354,15 +366,28 @@ function updateBlink(delta) {
     const v = 1.0 - Math.min(blinkTimer / 0.1, 1.0);
     currentVrm.expressionManager.setValue('blink', v);
     if (v <= 0) {
-      blinkPhase = 0;
-      blinkTimer = 0;
-      nextBlinkIn = 2 + Math.random() * 4;
+      blinksRemaining--;
+      if (blinksRemaining > 0) {
+        // 2連まばたき: 短い間を空けてもう一回
+        blinkPhase = 1;
+        blinkTimer = -0.08; // 80ms pause before next blink
+      } else {
+        blinkPhase = 0;
+        blinkTimer = 0;
+        nextBlinkIn = getBlinkInterval();
+      }
     }
   }
 }
 
 // ===== Idle Breathing & Speaking Nod =====
 let animElapsed = 0;
+
+// 呼吸の揺らぎ: ベース周期 + ゆっくり変化するノイズで周期・振幅を微妙に変える
+function breathNoise(t) {
+  // 2つの低周波sinを重ねて疑似ノイズ（黄金比で非周期的に）
+  return Math.sin(t * 0.13) * 0.4 + Math.sin(t * 0.21 * 1.618) * 0.3;
+}
 
 function updateIdleBreathing(delta) {
   if (!currentVrm) return;
@@ -372,10 +397,14 @@ function updateIdleBreathing(delta) {
   const spine = currentVrm.humanoid.getNormalizedBoneNode('spine');
 
   if (currentState === 'IDLE' || currentState === 'LISTENING') {
-    // 呼吸: 頭とspineのわずかな上下揺れ
-    if (spine) spine.rotation.x = Math.sin(animElapsed * 0.8) * 0.003;
-    if (head) head.rotation.x = Math.sin(animElapsed * 1.0) * 0.002;
-    if (head) head.rotation.y = 0;
+    // 呼吸: 周期と振幅に揺らぎを加える
+    const noise = breathNoise(animElapsed);
+    const spineFreq = 0.8 + noise * 0.15;   // 0.74〜0.86 の間で揺らぐ
+    const spineAmp = 0.003 + noise * 0.001;  // 振幅も微変動
+    const headFreq = 1.0 + noise * 0.1;
+    if (spine) spine.rotation.x = Math.sin(animElapsed * spineFreq) * spineAmp;
+    if (head) head.rotation.x = Math.sin(animElapsed * headFreq) * 0.002;
+    if (head) head.rotation.y = Math.sin(animElapsed * 0.3) * 0.003; // ごくわずかな首振り
   } else if (currentState === 'SPEAKING' && lipSync.active) {
     // 発話中: 軽い頷き（ビセムのタイミングに合わせて揺れる）
     const elapsed = lipSync.audioCtx.currentTime - lipSync.startTime;
