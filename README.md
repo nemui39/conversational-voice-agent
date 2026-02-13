@@ -1,29 +1,78 @@
 # Conversational Voice Agent
 
-音声入力からリアルタイムで会話できる熱血AIコーチ。
+ブラウザ上の3Dアバターとリアルタイムで音声会話できる熱血AIコーチ。
+
+VRMアバターがリップシンク付きで応答し、ユーザーの発話をリアルタイムに認識・返答する。
+
+## デモ
+
+```
+🎤 ブラウザ(マイク) → WebSocket(PCM 48kHz) → VAD → STT → LLM → TTS → WebSocket(WAV) → 🔊 ブラウザ(再生+リップシンク)
+```
 
 ## アーキテクチャ
 
 ```
-🎤 音声入力 → [STT: Whisper] → [LLM: Claude API] → [TTS: VOICEVOX] → 🔊 音声出力
+┌─────────────────────────────────────────────────────┐
+│  Browser (static/index.html)                        │
+│  ┌──────────┐  ┌──────────┐  ┌───────────────────┐  │
+│  │ AudioWork│  │ WebSocket│  │ Three.js + VRM    │  │
+│  │ let(mic) │→ │ (PCM)    │  │ アバター+リップ   │  │
+│  └──────────┘  └────┬─────┘  │ シンク+表情制御   │  │
+│                     │        └───────────────────┘  │
+└─────────────────────┼───────────────────────────────┘
+                      │ WebSocket (int16 PCM / JSON / WAV)
+┌─────────────────────┼───────────────────────────────┐
+│  Server (FastAPI)   │                               │
+│  ┌──────────────────▼──────────────────────────┐    │
+│  │ VAD (webrtcvad) → 発話区間検出              │    │
+│  │       ↓                                     │    │
+│  │ STT (faster-whisper) → テキスト化           │    │
+│  │       ↓                                     │    │
+│  │ LLM (Claude Sonnet 4.5) → 応答生成         │    │
+│  │       ↓                                     │    │
+│  │ TTS (VOICEVOX) → WAV + viseme生成          │    │
+│  └─────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────┘
 ```
 
 ## 技術スタック
 
-| コンポーネント | 技術 |
-|-------------|------|
-| Speech-to-Text | faster-whisper (small) |
-| LLM | Anthropic Claude API (Sonnet) |
-| Text-to-Speech | VOICEVOX |
-| オーディオI/O | sounddevice |
-| 言語 | Python 3.12+ |
+| コンポーネント | 技術 | 詳細 |
+|-------------|------|------|
+| LLM | Anthropic Claude API | Claude Sonnet 4.5 (`claude-sonnet-4-5-20250929`) |
+| STT | faster-whisper | small モデル, CPU int8量子化, polyphase リサンプル |
+| TTS | VOICEVOX Engine API | ローカル起動, 話者ID=1 |
+| VAD | webrtcvad | aggressiveness=2, 無音閾値0.4秒 |
+| 3Dアバター | Three.js + @pixiv/three-vrm | VRMモデル描画, BlendShape制御 |
+| リップシンク | VOICEVOX音素タイミング | `audio_query` の母音+長さ → visemeマッピング → BlendShape |
+| 音声通信 | WebSocket | AudioWorkletでPCM 48kHz送信, WAVバイナリ返送 |
+| サーバー | FastAPI + uvicorn | 非同期WebSocket, スレッドプールでSTT/LLM/TTS実行 |
+| 言語 | Python 3.12+ / JavaScript (ES Modules) | |
+
+## 主な機能
+
+- **リアルタイム音声会話**: ブラウザのマイクから話しかけるとアバターが音声で応答
+- **3D VRMアバター**: 待機中の呼吸・瞬きアニメーション、状態に応じた表情変化
+- **リップシンク**: VOICEVOX音素データに基づくリアルタイム口パク
+- **STT疑似ストリーミング**: 発話中に1秒間隔で部分認識テキストを表示
+- **エコー防止**: TTS再生中のマイクミュート + 500msクールダウン
+- **ハルシネーション対策**: Whisper `no_speech_prob` フィルタ + 既知パターンブロック
+- **音声前処理**: DC除去, RMS正規化, 無音ゲートでSTT精度を向上
+
+## AIコーチのプロンプト設計
+
+LLMには「情熱型AIコーチ」のシステムプロンプトを設定:
+
+- **口調**: タメ口で熱く、「いいね！」「最高だ！」など肯定から入る
+- **構成**: 肯定・承認(1文) → 核心のアドバイス(1〜2文) → 次の一歩(1文)
+- **制約**: 最大3文、句読点多め（音声で聞きやすく）、会話履歴は直近6ターン保持
 
 ## セットアップ
 
 ### 前提条件
 
 - Python 3.12+
-- PortAudio（`sudo apt install libportaudio2` / `brew install portaudio`）
 - [VOICEVOX](https://voicevox.hiroshiba.jp/) がローカルで起動していること（デフォルト: `http://localhost:50021`）
 - Anthropic API Key
 
@@ -46,29 +95,24 @@ cp .env.example .env
 
 ## 使い方
 
-### デモ（サンプル音声で実行）
+### Webアプリ（アバター + 音声会話）
 
 ```bash
-# やる気が出ないときのコーチ応答
-python -m voice_agent.main --file samples/in_motivation.wav --no-play
+# VOICEVOX を先に起動しておく
+uvicorn voice_agent.api:app --reload --host 0.0.0.0 --port 8000
 
-# プレゼン前の緊張へのコーチ応答
-python -m voice_agent.main --file samples/in_anxiety.wav --no-play
-
-# 出力先を指定
-python -m voice_agent.main --file samples/in_motivation.wav --out outputs/reply.wav --no-play
-
-# VOICEVOX 話者を変更（ID=3 など）
-python -m voice_agent.main --file input.wav --speaker 3 --no-play
+# ブラウザで http://localhost:8000 を開く
+# 「Connect」ボタンを押してマイクを許可 → 話しかける
 ```
 
-出力WAVは `outputs/reply.wav` に保存されます。
-
-### マイク入力テスト
+### CLIモード（デバッグ用）
 
 ```bash
+# サンプル音声で実行
+python -m voice_agent.main --file samples/in_motivation.wav --no-play
+
+# マイク入力テスト
 python -m voice_agent.main --mode stt
-python -m voice_agent.main --mode stt --save-wav
 ```
 
 ## ライセンス
